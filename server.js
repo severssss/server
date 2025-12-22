@@ -27,7 +27,7 @@ const botsConfig = [
 ];
 
 app.get('/', (req, res) => {
-    res.send('Bot Server Running. Bots are starting sequentially...');
+    res.send('Bot Server Running. Bots are auto-reconnecting...');
 });
 
 function escapeHtml(text) {
@@ -73,26 +73,56 @@ function startBot(config, index) {
         port: config.port,
         username: config.username,
         offline: true,
-        conLog: console.log 
+        conLog: console.log,
+        connectTimeout: 20000 // Увеличиваем таймаут подключения
     };
 
     console.log(`[Bot #${botId}] Connecting to ${config.port} as ${config.username}...`);
     
     let client;
+    let isReconnecting = false; // Флаг, чтобы не реконнектиться дважды
+    let afkInterval = null;     // Переменная для таймера анти-афк
+
+    // Единая функция для перезапуска
+    const scheduleReconnect = () => {
+        if (isReconnecting) return;
+        isReconnecting = true;
+
+        // Очищаем таймер анти-афк, если он был
+        if (afkInterval) clearInterval(afkInterval);
+
+        console.log(`[Bot #${botId}] Disconnected/Kicked. Reconnecting in 60s...`);
+        
+        // Пытаемся закрыть клиент, чтобы не висел в памяти
+        try { client?.close(); } catch (e) {}
+
+        setTimeout(() => {
+            startBot(config, index);
+        }, 60000); // 60 секунд (1 минута)
+    };
+
     try {
         client = bedrock.createClient(options);
     } catch (e) {
         console.log(`[Bot #${botId}] Startup error:`, e.message);
-        setTimeout(() => startBot(config, index), 30000);
+        scheduleReconnect();
         return;
     }
 
     client.on('error', (err) => {
         console.log(`[Bot #${botId}] Error:`, err.message); 
+        scheduleReconnect();
     });
 
     client.on('kick', (reason) => {
-        console.log(`[Bot #${botId}] Kicked:`, reason);
+        // При ночной перезагрузке сервер шлет kick
+        console.log(`[Bot #${botId}] Kicked by server.`); 
+        scheduleReconnect();
+    });
+
+    client.on('end', () => {
+        console.log(`[Bot #${botId}] Session ended.`);
+        scheduleReconnect();
     });
 
     client.on('modal_form_request', (packet) => {
@@ -112,20 +142,33 @@ function startBot(config, index) {
             }
 
             setTimeout(() => {
-                client.queue('modal_form_response', {
-                    form_id: packet.form_id,
-                    has_response_data: true,
-                    data: JSON.stringify(responseArray),
-                    cancel_reason: undefined
-                });
+                // Проверяем, жив ли клиент перед отправкой ответа
+                if (!isReconnecting) {
+                    client.queue('modal_form_response', {
+                        form_id: packet.form_id,
+                        has_response_data: true,
+                        data: JSON.stringify(responseArray),
+                        cancel_reason: undefined
+                    });
+                }
             }, 2000);
         } catch (e) {}
     });
 
     client.on('spawn', () => {
         console.log(`[Bot #${botId}] Spawned successfully!`);
-        setInterval(() => {
-            client.queue('animate', { action_id: 1, runtime_entity_id: 0 });
+        
+        // Анти-АФК
+        afkInterval = setInterval(() => {
+            if (isReconnecting) {
+                clearInterval(afkInterval);
+                return;
+            }
+            try {
+                client.queue('animate', { action_id: 1, runtime_entity_id: 0 });
+            } catch (e) {
+                clearInterval(afkInterval);
+            }
         }, 8000);
     });
 
@@ -143,16 +186,13 @@ function startBot(config, index) {
             html: minecraftToHtml(message)
         });
     });
-
-    client.on('end', () => {
-        console.log(`[Bot #${botId}] Disconnected. Reconnecting in 30s...`);
-        setTimeout(() => startBot(config, index), 30000);
-    });
 }
 
 async function startAllBots() {
+    console.log('Starting all bots with 10s delay between each...');
     for (let i = 0; i < botsConfig.length; i++) {
         startBot(botsConfig[i], i);
+        // Задержка между запусками ботов, чтобы не спамить сервер подключениями
         await new Promise(resolve => setTimeout(resolve, 10000));
     }
     console.log('All start sequences initiated.');
