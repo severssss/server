@@ -14,6 +14,7 @@ const io = socketIo(server, {
 });
 
 const BASE_HOST = 'ananasmine.ru';
+let chatHistory = [];
 
 const botsConfig = [
     { port: 19133, username: 'zveruga1', password: 'garova' },
@@ -28,6 +29,12 @@ const botsConfig = [
 
 app.get('/', (req, res) => {
     res.send('Bot Server Running. Bots are auto-reconnecting...');
+});
+
+io.on('connection', (socket) => {
+    const now = Date.now();
+    chatHistory = chatHistory.filter(m => now - m.t < 300000);
+    chatHistory.forEach(m => socket.emit('chat_message', m));
 });
 
 function escapeHtml(text) {
@@ -74,31 +81,28 @@ function startBot(config, index) {
         username: config.username,
         offline: true,
         conLog: console.log,
-        connectTimeout: 20000 // Увеличиваем таймаут подключения
+        connectTimeout: 20000 
     };
 
     console.log(`[Bot #${botId}] Connecting to ${config.port} as ${config.username}...`);
     
     let client;
-    let isReconnecting = false; // Флаг, чтобы не реконнектиться дважды
-    let afkInterval = null;     // Переменная для таймера анти-афк
+    let isReconnecting = false; 
+    let afkInterval = null;     
 
-    // Единая функция для перезапуска
     const scheduleReconnect = () => {
         if (isReconnecting) return;
         isReconnecting = true;
 
-        // Очищаем таймер анти-афк, если он был
         if (afkInterval) clearInterval(afkInterval);
 
         console.log(`[Bot #${botId}] Disconnected/Kicked. Reconnecting in 60s...`);
         
-        // Пытаемся закрыть клиент, чтобы не висел в памяти
         try { client?.close(); } catch (e) {}
 
         setTimeout(() => {
             startBot(config, index);
-        }, 60000); // 60 секунд (1 минута)
+        }, 60000); 
     };
 
     try {
@@ -115,7 +119,6 @@ function startBot(config, index) {
     });
 
     client.on('kick', (reason) => {
-        // При ночной перезагрузке сервер шлет kick
         console.log(`[Bot #${botId}] Kicked by server.`); 
         scheduleReconnect();
     });
@@ -142,7 +145,6 @@ function startBot(config, index) {
             }
 
             setTimeout(() => {
-                // Проверяем, жив ли клиент перед отправкой ответа
                 if (!isReconnecting) {
                     client.queue('modal_form_response', {
                         form_id: packet.form_id,
@@ -158,7 +160,6 @@ function startBot(config, index) {
     client.on('spawn', () => {
         console.log(`[Bot #${botId}] Spawned successfully!`);
         
-        // Анти-АФК
         afkInterval = setInterval(() => {
             if (isReconnecting) {
                 clearInterval(afkInterval);
@@ -181,10 +182,16 @@ function startBot(config, index) {
 
         message = message.replace(/^\[CHAT\]\s*/, '').replace(/[Ⓖ]/g, '').trim();
 
-        io.emit('chat_message', {
+        const msgObj = {
             id: botId,
-            html: minecraftToHtml(message)
-        });
+            html: minecraftToHtml(message),
+            t: Date.now()
+        };
+
+        chatHistory.push(msgObj);
+        chatHistory = chatHistory.filter(m => Date.now() - m.t < 300000);
+
+        io.emit('chat_message', msgObj);
     });
 }
 
@@ -192,7 +199,6 @@ async function startAllBots() {
     console.log('Starting all bots with 10s delay between each...');
     for (let i = 0; i < botsConfig.length; i++) {
         startBot(botsConfig[i], i);
-        // Задержка между запусками ботов, чтобы не спамить сервер подключениями
         await new Promise(resolve => setTimeout(resolve, 10000));
     }
     console.log('All start sequences initiated.');
